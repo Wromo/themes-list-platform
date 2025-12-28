@@ -1,0 +1,91 @@
+name: Wromo Theme Gatekeeper & Deploy
+
+# It is activated when someone pushes to Main or opens a Pull Request to Main,
+# but only if files in the 'themes' folder are changed.
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'themes/**' # It only runs if the themes are changed.
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'themes/**'
+
+jobs:
+  security-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      # 1. VERIFYING FORBIDDEN FILES (Backdoor protection)
+      # If it finds PHP, EXE, SH, stop everything.
+      - name: Scan for Forbidden Files
+        run: |
+          echo "Scanning for malicious file types..."
+          if find themes -type f \( -name "*.php" -o -name "*.exe" -o -name "*.sh" -o -name "*.py" -o -name "*.bat" \); then
+            echo "❌ CRITICAL: Forbidden file types detected! Only HTML/CSS/JS/JSON allowed."
+            exit 1
+          else
+            echo "✅ File type check passed."
+          fi
+
+      # 2. VALIDATE JSON SYNTAX (To prevent Dashboard crashes)
+      - name: Validate JSON Syntax
+        run: |
+          echo "Validating JSON files..."
+          # Install utility called jsonlint
+          sudo apt-get install -y jq
+          
+          # Caută toate fișierele json și le verifică
+          find themes -name "*.json" -print0 | xargs -0 -I {} bash -c 'cat "{}" | jq empty || exit 255'
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ ERROR: Invalid JSON syntax found."
+            exit 1
+          fi
+          echo "✅ All JSON files are valid."
+
+      # 3. MALIGNANT JS SCAN (Basic Security)
+      # Look for dangerous commands like eval() or cookie access
+      - name: Scan for Malicious Code Patterns
+        run: |
+          echo "Scanning for dangerous code patterns..."
+          # We are looking for 'eval(' ​​or attempts to steal tokens via 'document.cookie'
+          if grep -r "eval(" themes || grep -r "document.cookie" themes; then
+            echo "⚠️ WARNING: Suspicious code detected (eval or cookie access). Please review manually."
+            # uncomment the line below to automatically block:
+            # exit 1 
+          else
+            echo "✅ Code looks clean."
+          fi
+
+  deploy-to-bucket:
+    needs: security-check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write' # Required for Google Auth
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      # 4. AUTHENTICATION WITH GOOGLE CLOUD
+      - id: 'auth'
+        uses: 'google-github-actions/auth@v1'
+        with:
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+      # 5. INSTALL GCLOUD SDK
+      - name: 'Set up Cloud SDK'
+        uses: 'google-github-actions/setup-gcloud@v1'
+
+      # 6. COPY TO BUCKET (SYNC)
+      # Copy everything in the 'themes' folder from GitHub to the 'privat-wromo' bucket
+      - name: 'Deploy to Storage'
+        run: |
+          gsutil -m rsync -r -d themes/ gs://privat-wromo/themes/
+          echo "🚀 Themes deployed successfully to Bucket!"
